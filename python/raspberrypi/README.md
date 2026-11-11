@@ -1,0 +1,285 @@
+# DFRobot_SGX6410_Gravity
+- [中文版](./README_CN.md)
+
+DFRobot_SGX6410_Gravity is the Raspberry Pi Python library for the Gravity MEMS Air Quality Sensor (SKU: SEN0771). The module uses an SGX6410 gas sensor to estimate indoor air quality and reports IAQ, TVOC, ethanol equivalent (ETOH), estimated CO2 (eCO2), and relative IAQ (RelIAQ). An on-board SHT40 can supply temperature and humidity for automatic humidity compensation.
+
+The host talks to the Gravity module over I2C or UART Modbus RTU, not to the SGX6410 or SHT40 chips on the bus directly. I2C uses a 16-bit little-endian register map on the Pi I2C bus (typically bus 1). UART defaults to 9600 8N1 on `/dev/ttyAMA0`. The slave address is 0x52 or 0x53, selected by ADD_SEL at power-up; COM_SEL selects I2C or UART.
+
+Typical workflow: call `begin()` to verify the DFRobot vendor ID (`0x3343`), set an operation mode (IAQ / ULP / PBAQ / Suspend), wait until warm-up completes (`valid` is true), then call `update()` and read the cached gas data. Humidity can be written manually as 0–100 %RH. After automatic compensation is enabled, the module internally polls the SHT40 every 60 s. In the examples, `ctype = 0` selects I2C and any other value selects UART.
+
+## Product Link ([https://www.dfrobot.com](https://www.dfrobot.com))
+
+```
+SKU: SEN0771
+```
+
+## Table of Contents
+
+  * [Product Link](#product-link-httpswwwdfrobotcom)
+  * [Summary](#summary)
+  * [Installation](#installation)
+  * [Methods](#methods)
+  * [Compatibility](#compatibility)
+  * [History](#history)
+  * [Credits](#credits)
+
+## Summary
+
+* Dual interface: I2C (`SMBus`) or UART Modbus RTU (`/dev/ttyAMA0`, holding `0x03`/`0x06`, input `0x04`), address `0x52` / `0x53`
+* UART default line settings: 9600 8N1. ADD_SEL is latched at power-up and is also the Modbus slave address
+* `begin()` verifies DFRobot vendor ID `0x3343` and can then read module PID, firmware version, latched address, SGX6410 product ID (`0x2310`) and 6-byte tracking number
+* Operation modes: Suspend; IAQ (~3 s sample, ~5 min warm-up); ULP (~90 s sample, ~15 min warm-up); PBAQ (~5 s sample, ~5 min warm-up). Each mode returns a different set of gas fields, see [Measurement by mode](#measurement-by-mode)
+* Check `is_new` for a fresh sample and `valid` for warm-up completion before using the readings
+* Manual humidity compensation: write 0–100 %RH (stored as code 0–255)
+* After automatic humidity compensation is enabled, the module internally polls the SHT40 every 60 s. `get_sht40_data()` returns that cached temperature (°C) and humidity (%RH)
+
+### Gas fields and meanings
+
+The SGX6410 reports algorithm-processed air-quality indicators and gas equivalents. These values are not laboratory-grade, selective measurements of every individual gas in the air.
+
+| Field | What it represents | Measurement and unit | Notes |
+| --- | --- | --- | --- |
+| `IAQ` | Indoor Air Quality index (UBA level) | Dimensionless index; IAQ/ULP use `raw / 10` | A combined air-quality indicator derived mainly from VOC-related sensor responses; it is not the concentration of one gas. |
+| `TVOC` | Total Volatile Organic Compounds | Estimated concentration in `mg/m³` | Represents the overall level of volatile organic compounds, rather than one specific compound. |
+| `ETOH` | Ethanol equivalent | Equivalent concentration in `ppm` | A reducing-gas/VOC response expressed as an ethanol equivalent; it is not a selective ethanol measurement. |
+| `eCO2` | Estimated CO₂ | Estimated concentration in `ppm` | An algorithmic estimate based on the air-quality response; it is not a direct NDIR CO₂ measurement. It is `NAN` in PBAQ and Suspend. |
+| `RELIAQ` | Relative indoor air quality | Relative, dimensionless value; IAQ/ULP use `raw / 10` | A relative air-quality indicator for changes or trends; it is not an absolute gas concentration. It is `NAN` in PBAQ and Suspend. |
+
+The on-board SHT40 also reports `temperature` in °C and `humidity` in %RH. These are environmental readings used for humidity compensation, not gas concentrations.
+
+### Measurement by mode
+
+`update()` / `get_all_gas_data()` do not always fill every field. IAQ and ULP report the full set. PBAQ only reports TVOC and ETOH (and uses a different scale). Suspend has no measurement payload, so `update()` returns `False`.
+
+| Mode | Line value | Period / warm-up | IAQ | TVOC | ETOH | eCO2 | RelIAQ |
+| ---- | ---------- | ---------------- | --- | ---- | ---- | ---- | ------ |
+| IAQ | `0x01` | ~3 s / ~5 min | raw/10 | raw/100 mg/m³ | raw/100 ppm | raw ppm | raw/10 |
+| ULP | `0x02` | ~90 s / ~15 min | raw/10 | raw/100 mg/m³ | raw/100 ppm | raw ppm | raw/10 |
+| PBAQ | `0x05` | ~5 s / ~5 min | NAN | raw/1000 mg/m³ | raw/1000 ppm | NAN | NAN |
+| Suspend | `0x00` | — | — | — | — | — | — |
+
+IAQ / ULP sample (`examples/get_data`, after warm-up):
+
+```
+Humidity comp enable=0
+Mode:     0x1
+IAQ:      1.60
+TVOC:     0.41 mg/m3
+ETOH:     0.21 ppm
+ECO2:     401.0 ppm
+RELIAQ:   1.00
+Data valid: YES
+--------------------
+```
+
+ULP uses the same fields. Only the mode line changes to `Mode:     0x2`, and a new sample arrives about every 90 s.
+
+PBAQ sample (`examples/set_operation_mode`). IAQ / eCO2 / RelIAQ print as `nan`:
+
+```
+Mode:     0x5
+IAQ:      nan
+TVOC:     0.04 mg/m3
+ETOH:     0.02 ppm
+ECO2:     nan ppm
+RELIAQ:   nan
+Data valid: YES
+--------------------
+```
+
+Suspend / no measurement:
+
+```
+Failed to read gas data!
+```
+
+## Installation
+
+1. Enable I2C and/or UART on the Raspberry Pi (`raspi-config`).
+2. Install dependencies:
+
+```
+sudo apt-get update
+sudo apt-get install python3-smbus python3-serial
+```
+
+3. Copy this `python/raspberrypi/` folder onto the Pi, then run an example:
+
+```
+python3 examples/get_data/get_data.py
+```
+
+Set `ctype = 0` for I2C or a non-zero value for UART. UART also needs `DFRobot_RTU.py` in the same folder as `DFRobot_SGX6410_Gravity.py`.
+
+## Methods
+
+```python
+  # DFRobot_SGX6410_Gravity_I2C
+  def __init__(self, bus, addr):
+    '''!
+      @brief Constructor
+      @param bus I2C bus number, typically 1 on Raspberry Pi
+      @param addr Slave address, 0x52 or 0x53, default 0x53
+      @n ADD_SEL low selects 0x52, ADD_SEL high selects 0x53. The switch is latched at module power-up.
+    '''
+
+  # DFRobot_SGX6410_Gravity_UART
+  def __init__(self, baud, addr):
+    '''!
+      @brief Constructor
+      @param baud Baud rate, default 9600
+      @param addr Modbus slave address, 0x52 or 0x53, default 0x53
+      @n COM_SEL must be UART. Default line settings are 9600 8N1 on /dev/ttyAMA0.
+    '''
+
+  def begin(self):
+    '''!
+      @brief Initialize the module and verify the vendor ID
+      @return True on success, False on failure
+      @n Reads DEVICE_VID (0x3343). Module PID may still be 0x0000 until the product ID is assigned.
+    '''
+
+  def reset(self):
+    '''!
+      @brief Send a sensor reset command to the module
+      @return True on success, False on failure
+      @n Host writes 0x0001 to the reset register. The register reads back as 0.
+      @n After reset, wait for the module to finish SGX6410 start-up before calling update().
+    '''
+
+  def set_operation_mode(self, mode):
+    '''!
+      @brief Set SGX6410 operation mode
+      @param mode Operation mode
+      @n SUSPEND: Suspend mode
+      @n IAQ: IAQ 2nd generation, about 3 s sample period, 5 min warm-up
+      @n ULP: Ultra-low power, about 90 s sample period, 15 min warm-up
+      @n PBAQ: PBAQ, about 5 s sample period, 5 min warm-up
+      @n Mode change is a maintenance action. The module restarts warm-up and clears is_new/valid.
+      @n The sensor operation mode is saved in non-volatile memory and automatically restored after a power cycle.
+      @return True on success, False on failure
+    '''
+
+  def get_operation_mode(self):
+    '''!
+      @brief Read the current SGX6410 operation mode
+      @return Current mode register value
+      @n Returns SUSPEND when the read fails.
+    '''
+
+  def set_humidity_compensate(self, rh):
+    '''!
+      @brief Write ambient relative humidity for algorithm compensation
+      @param rh Relative humidity, range 0.0 to 100.0, unit %RH
+      @n Host converts rh to code = round(rh * 255 / 100) and writes the 0-255 code.
+      @n This is a manual write. It does not enable the on-board SHT40 path.
+      @return True on success, False on failure
+    '''
+
+  def get_humidity_compensate(self):
+    '''!
+      @brief Read the last humidity code as %RH
+      @return Relative humidity in %RH reconstructed from the 0-255 code
+      @n Returns NAN when the register read fails.
+    '''
+
+  def set_auto_humi_compensation(self, enable):
+    '''!
+      @brief Enable or disable automatic SHT40 humidity compensation on the module
+      @param enable HUM_COMP_DISABLE or HUM_COMP_ENABLE
+      @n HUM_COMP_ENABLE: read SHT40 immediately, then the module internally polls SHT40 every 60 s
+      @n The automatic humidity compensation enable/disable setting is saved in non-volatile memory and automatically restored after a power cycle.
+      @return True on success, False on failure
+    '''
+
+  def get_humidity_comp_enable(self):
+    '''!
+      @brief Read the automatic humidity compensation switch
+      @return Current switch
+      @n Returns HUM_COMP_DISABLE when the read fails.
+    '''
+
+  def get_vid(self):
+    '''!
+      @brief Read DFRobot vendor ID
+      @return Vendor ID, expected 0x3343
+    '''
+
+  def get_pid(self):
+    '''!
+      @brief Read module product ID
+      @return Module PID
+    '''
+
+  def get_fw_version(self):
+    '''!
+      @brief Read module firmware version
+      @return Encoded version, V1.0.0.0 is 0x1000
+    '''
+
+  def get_device_addr(self):
+    '''!
+      @brief Read the latched external slave address
+      @return 7-bit address, 0x52 or 0x53
+    '''
+
+  def get_sgx_product_id(self):
+    '''!
+      @brief Read cached SGX6410 product ID
+      @return Sensor product ID, expected 0x2310
+    '''
+
+  def get_tracking_number(self):
+    '''!
+      @brief Read the six-byte SGX6410 tracking number
+      @return Six-byte list on success, None on failure
+    '''
+
+  def update(self):
+    '''!
+      @brief Read mode flags and measurement registers, then scale to engineering units
+      @return True if registers were read
+      @n Call this before get_all_gas_data() / get_single_gas_data().
+    '''
+
+  def get_all_gas_data(self):
+    '''!
+      @brief Return the cached gas measurement structure
+      @return GasData Latest cached measurement
+      @n Must call update() first. Check is_new for a new sample and valid for warm-up completion.
+    '''
+
+  def get_single_gas_data(self, data_type):
+    '''!
+      @brief Return one value from the cached measurement
+      @param data_type DATA_IAQ / DATA_TVOC / DATA_ETOH / DATA_ECO2 / DATA_RELIAQ
+      @return Cached value, or NAN if unsupported in the current mode
+    '''
+
+  def get_sht40_data(self):
+    '''!
+      @brief Read on-board SHT40 temperature and humidity from the module cache
+      @return SHT40Data Cached temperature (C) and humidity (%RH)
+      @n Firmware reads SHT40 only after set_auto_humi_compensation(HUM_COMP_ENABLE). The module then polls SHT40 internally every 60 s.
+    '''
+```
+
+## Compatibility
+
+| Board        | Work Well | Work Wrong | Untested | Remarks |
+| ------------ | :-------: | :--------: | :------: | ------- |
+| RaspberryPi4 |     √     |            |          |         |
+
+* Python Version
+
+| Python  | Work Well | Work Wrong | Untested | Remarks |
+| ------- | :-------: | :--------: | :------: | ------- |
+| Python3 |     √     |            |          |         |
+
+## History
+
+- 2026/09/12 - V1.0.0 version
+
+## Credits
+
+Written by PLELES(li.jia@dfrobot.com), 2026. (Welcome to our [website](https://www.dfrobot.com/))
